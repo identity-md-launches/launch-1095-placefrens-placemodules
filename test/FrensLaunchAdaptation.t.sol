@@ -277,7 +277,9 @@ contract FrensLaunchAdaptationTest is FrensReviewBase {
         assertLe(gotImd + got * 1e18 / swapper.floorRate(), paid);
     }
 
-    function test_Risk_SpentNonceStrandsJobAllowanceInPinnedCollection() public {
+    /// @dev Fixed after IMD's audit (the judge's low finding): a payment over a Permit2 nonce already spent is refused,
+    ///      so its 0.50 $IMD can't be stranded in the allowance; the request's job money stays to pay a fresh nonce
+    function test_Fix_SpentNonceIsRefused() public {
         script.setup();
         uint256 id = _first();
         permit2.spend(address(frens), 42);
@@ -285,16 +287,13 @@ contract FrensLaunchAdaptationTest is FrensReviewBase {
         IMD6900Frens.Quote memory q =
             IMD6900Frens.Quote("audit", bytes32("scope"), "1", bytes32("q"), bytes32("p"), "job.open", expiry);
         vm.prank(FrensPlan.KEEPER);
+        vm.expectRevert(IMD6900Frens.BadJob.selector);
         frens.approveJob(id, 42, expiry, q);
-        assertEq(imd.allowance(address(frens), address(permit2)), 0.5e18);
-        assertEq(frens.jobBudget(), 0);
-        vm.warp(expiry + 1);
-        vm.expectRevert(IMD6900Frens.BadJob.selector);
-        frens.releaseLapsedJob(id);
+        assertEq(imd.allowance(address(frens), address(permit2)), 0, "nothing approved");
+        assertEq(frens.jobBudget(), 0.5e18, "the job money is still there");
         vm.prank(FrensPlan.KEEPER);
-        vm.expectRevert(IMD6900Frens.BadJob.selector);
-        frens.approveJob(id, 43, block.timestamp + 600, q);
-        assertEq(imd.balanceOf(address(frens)) - frens.floorImd() - frens.jobBudget(), 0.5e18);
+        frens.approveJob(id, 43, expiry, q);
+        assertEq(imd.allowance(address(frens), address(permit2)), 0.5e18, "a fresh nonce pays the job");
     }
 
     function test_Risk_UnsupportedRoyaltyTokenHasNoFloorRoute() public {

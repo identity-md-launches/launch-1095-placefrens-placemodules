@@ -20,18 +20,18 @@ library FrensPlan {
     address internal constant PAIR_HOOK = 0x667f4621030aCfAfb1bD0B64d33610A8567f2A44;
     address internal constant POOL4_HOOK = 0xc6C965Bd164c483e87d0B550671798e9A3602840;
     bytes32 internal constant PRICES_SALT = 0x0000000000000000000000000000000000000000000000000000000000000001;
-    bytes32 internal constant FRENS_SALT = 0x063c0621992dc16d4cd8b37a279be93e3c4171a61979edd00d1feac9e3740d53;
-    bytes32 internal constant SWAPPER_SALT = 0xdeaf6d3c182075a6ac200110af80c7ec8080265f2deb7d3e2aeec281e056d188;
+    bytes32 internal constant FRENS_SALT = 0x4f900cd477e15b6a5c2e9edf0a3895d76748f008e47cd76826508e63a3489a05;
+    bytes32 internal constant SWAPPER_SALT = 0x290c57874c15123599b99c6137a098446d68170e903a27ac1676d8a76eaf8233;
     bytes32 internal constant MINTER_SALT = 0x0000000000000000000000000000000000000000000000000000000000000002;
     bytes32 internal constant GATE_SALT = 0x0000000000000000000000000000000000000000000000000000000000000003;
     /// @notice where it lands on Ethereum (any chain with the CREATE2 deployer)
     address internal constant PRICES_AT = 0x8f135B75Df156e6346c8525E138bC2BD652146ff;
     /// @notice where it lands on Ethereum (any chain with the CREATE2 deployer)
-    address internal constant FRENS_AT = 0x69007Ce82E0BF7981780585afF7c597415903547;
+    address internal constant FRENS_AT = 0x6900d042460d6bdbe68CE994F4dE36706797CCd4;
     /// @notice where it lands on Ethereum (any chain with the CREATE2 deployer)
-    address internal constant SWAPPER_AT = 0x6900453deFAc8Bb12eabdcf57CCC5a14E7628AeE;
+    address internal constant SWAPPER_AT = 0x69002297DD7980af0d24249f6a44E7046B1Cb1fb;
     /// @notice where it lands on Ethereum (any chain with the CREATE2 deployer)
-    address internal constant MINTER_AT = 0xBbb2796c9C54330788915990Ba36FDDe6dC198cF;
+    address internal constant MINTER_AT = 0x46B50a3061Ea692e075231c13bc653FdD1Bedd29;
     /// @notice where it lands on Ethereum (any chain with the CREATE2 deployer)
-    address internal constant GATE_AT = 0x3F8d1553Cb71C8B5af013Ce985591d9B9BCD9ce2;
+    address internal constant GATE_AT = 0xF83807Ec2E27e1771Fb2594139c1F6925Cfd9B8E;
 }

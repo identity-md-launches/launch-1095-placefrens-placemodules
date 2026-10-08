@@ -54,6 +54,14 @@ def at(salt, init_hex):
     h = keccak("ff" + CREATE2_DEPLOYER[2:].lower() + salt[2:] + keccak(init_hex)[2:])
     return cast("to-check-sum-address", "0x" + h[-40:])
 
+# IMD's admission scan reads code as instructions and refuses CALLCODE, DELEGATECALL and SELFDESTRUCT bytes; the
+# compiler may keep a salt as raw data after the code (no PUSH in front), so a salt holding one of them can trip the
+# scan wherever it sits. Only clean salts are kept or mined.
+BAD = ("f2", "f4", "ff")
+def clean(salt):
+    h = salt[2:].lower()
+    return not any(h[i:i + 2] in BAD for i in range(0, len(h), 2))
+
 def kept(name, prefix, init_hex):
     """The salt FrensPlan already has, while it still puts the contract at the prefix (the plan doesn't move)"""
     try:
@@ -62,7 +70,7 @@ def kept(name, prefix, init_hex):
         return None
     if m and "--remine" not in sys.argv:
         a = at(m.group(1), init_hex)
-        if a[2:].lower().startswith(prefix.lower()):
+        if a[2:].lower().startswith(prefix.lower()) and clean(m.group(1)):
             return m.group(1), a
     return None
 
@@ -70,15 +78,18 @@ def mine(name, prefix, init_hex):
     k = kept(name, prefix, init_hex)
     if k:
         return k
-    out = cast("create2", "--starts-with", prefix, "--deployer", CREATE2_DEPLOYER, "--init-code-hash", keccak(init_hex), "--threads", str(os.cpu_count()))
-    # newer cast prints the result as "address<TAB>salt" on stdout (the rest on stderr); older ones as "Address:" / "Salt:" lines
-    tsv = re.search(r"^(0x[0-9a-fA-F]{40})\s+(0x[0-9a-fA-F]{64})\s*$", out, re.M)
-    if tsv:
-        return tsv.group(2), tsv.group(1)
-    salt = re.search(r"Salt:\s*(0x[0-9a-fA-F]{64})|Salt:\s*(\d+)", out)
-    addr = re.search(r"Address:\s*(0x[0-9a-fA-F]{40})", out).group(1)
-    s = salt.group(1) or "0x%064x" % int(salt.group(2))
-    return s, addr
+    while True:
+        out = cast("create2", "--starts-with", prefix, "--deployer", CREATE2_DEPLOYER, "--init-code-hash", keccak(init_hex), "--threads", str(os.cpu_count()))
+        # newer cast prints the result as "address<TAB>salt" on stdout (the rest on stderr); older ones as "Address:" / "Salt:" lines
+        tsv = re.search(r"^(0x[0-9a-fA-F]{40})\s+(0x[0-9a-fA-F]{64})\s*$", out, re.M)
+        if tsv:
+            s, addr = tsv.group(2), tsv.group(1)
+        else:
+            salt = re.search(r"Salt:\s*(0x[0-9a-fA-F]{64})|Salt:\s*(\d+)", out)
+            addr = re.search(r"Address:\s*(0x[0-9a-fA-F]{40})", out).group(1)
+            s = salt.group(1) or "0x%064x" % int(salt.group(2))
+        if clean(s):
+            return s, addr
 
 def main():
     code = {n: creation(n) for n in ("FrenPrices", "IMD6900Frens", "FrenSwapper", "FrenMinter", "FrenWorkerGate")}

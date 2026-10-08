@@ -19,6 +19,10 @@ interface IPairFee {
     function fee() external view returns (uint256); // the launch pool's fee, in bips, that every trade here pays
 }
 
+interface IBalanceOf {
+    function balanceOf(address) external view returns (uint256);
+}
+
 /// @title FrenSwapper - buys the frens' floor: $IMD through the IMD6900/IMD pool, and fee ETH through $IMD first
 /// @notice Only the frens contract calls it. It holds nothing between calls: what comes in is swapped, and all the
 ///         IMD6900 out goes straight to `to`. The minimum out is checked here and again by the frens contract.
@@ -45,6 +49,7 @@ contract FrenSwapper is IFrenSwapper {
 
     uint256 internal constant BIPS = 10_000;
     uint256 public constant POOL4_MOVE_BIPS = 50; // POOL4's price moves at most 0.5% a buy
+    address internal constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2; // royalties often come as WETH
     /// @notice A floor buy this big ($IMD) moves the average a full step; a smaller one moves it in proportion
     uint256 public constant FULL_BUY = 50e18; // the frens' default maxImdPerBuy
 
@@ -99,6 +104,28 @@ contract FrenSwapper is IFrenSwapper {
         return PoolKey(Currency.wrap(address(0)), Currency.wrap(imd), 10_000, 60, IHooks(imdPoolHook));
     }
 
+    /// @notice $IMD per ETH at POOL4's price now (1e18): ETH is its currency0, $IMD its currency1
+    function imdPerEth() public view returns (uint256) {
+        (uint160 p,,,) = poolManager.getSlot0(imdKey().toId());
+        return _rate(p, true);
+    }
+
+    /// @notice The ETH and WETH `holder` holds (the frens: royalties and fees not bought into the floor yet), in $IMD at
+    ///         POOL4's price now: the frens' mint and treasury prices count it, so nobody buys in before it is bought
+    ///         and sells straight back after (IMD audit)
+    function pendingImd(address holder) public view returns (uint256) {
+        uint256 eth = holder.balance;
+        if (WETH.code.length != 0) eth += IBalanceOf(WETH).balanceOf(holder);
+        return eth == 0 ? 0 : FullMath.mulDiv(eth, imdPerEth(), 1e18);
+    }
+
+    /// @notice `reserve` IMD6900 at floorRate (its dearest), plus `holder`'s ETH and WETH at POOL4's price, in $IMD:
+    ///         the frens' floor beside its own $IMD, as their mint and treasury prices count it
+    function floorValue(uint256 reserve, address holder) external view returns (uint256 value) {
+        if (reserve != 0) value = reserve * 1e18 / floorRate();
+        value += pendingImd(holder);
+    }
+
     /// @notice IMD6900 per $IMD at the IMD6900/$IMD pool's price now (1e18)
     function spotRate() public view returns (uint256) {
         PoolKey memory key = pairKey();
@@ -115,7 +142,7 @@ contract FrenSwapper is IFrenSwapper {
 
     /// @notice IMD6900 per $IMD at its dearest of the pool's price now and the floor buys' average (1e18): what the
     ///         frens contract values its IMD6900 at when it prices a mint
-    function floorRate() external view returns (uint256 rate) {
+    function floorRate() public view returns (uint256 rate) {
         rate = spotRate();
         if (rateAverage != 0 && rateAverage < rate) rate = rateAverage;
     }

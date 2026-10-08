@@ -9,12 +9,12 @@ that start `0x6900`.
 
 | | where it lands on Ethereum |
 |---|---|
-| Worker Frens, the collection (ERC-721, 2222 frens) | `0x69007Ce82E0BF7981780585afF7c597415903547` |
-| FrenSwapper, the floor's buys | `0x6900453deFAc8Bb12eabdcf57CCC5a14E7628AeE` (or the launch's own: `PlaceModules.swapper()`, see below) |
-| FrenMinter, minting with ETH | `0xBbb2796c9C54330788915990Ba36FDDe6dC198cF` |
-| FrenWorkerGate, the workers' and WL's window | `0x3F8d1553Cb71C8B5af013Ce985591d9B9BCD9ce2` |
+| Worker Frens, the collection (ERC-721, 2222 frens) | `0x6900d042460d6bdbe68CE994F4dE36706797CCd4` |
+| FrenSwapper, the floor's buys | `0x69002297DD7980af0d24249f6a44E7046B1Cb1fb` (or the launch's own: `PlaceModules.swapper()`, see below) |
+| FrenMinter, minting with ETH | `0x46B50a3061Ea692e075231c13bc653FdD1Bedd29` |
+| FrenWorkerGate, the workers' and WL's window | `0xF83807Ec2E27e1771Fb2594139c1F6925Cfd9B8E` |
 | FrenPrices, the price curve as code | `0x8f135B75Df156e6346c8525E138bC2BD652146ff` |
-| WorkerFrensRenderer, the art | the art launch's (it follows from IMD's deployer) |
+| WorkerFrensRenderer, the art | `0x0a2e5e0c1d00fe63ab4e391c052a023cc7a16292` (LIVE: IMD launch 1067, with WorkerArt1 `0x048f…ef9f` and WorkerArt2 `0x1e3a…0758`) |
 
 The addresses moved from the plan's first version when the launch review's fixes changed the collection's, the swapper's and
 the gate's code (`ADAPTATION.md` lists them); the price table's didn't change.
@@ -74,12 +74,31 @@ the exact creation code:
 Anyone can put these exact bytes at these addresses, and the launch takes the contract as it is, with one check: the
 swapper's slow price average is seeded from the IMD6900/$IMD pool's price in the block that creates it, so one placed in
 a block whose price was pushed would make the frens value their floor off that price. `PlaceModules` takes the swapper
-at `0x6900453d…` only if its average is the pool's price at the launch (within 2x); otherwise it leaves it there and
+at `0x69002297…` only if its average is the pool's price at the launch (within 2x); otherwise it leaves it there and
 creates its own with a plain CREATE (nobody else can put anything at that address), seeded at the launch block's price,
 and that one is the frens' swapper: read `PlaceModules.swapper()`, which `setup()` does. The launch itself should go
 through a private relay, so nobody can push the price in the launch's own block. On a chain without the CREATE2 deployer
 (IMD's fresh-chain run) the launch creates the same contracts with its own CREATE2. The renderer's constructor refuses
 anything but the two exact art chunks (`BadArt`): a renderer over other code would draw nothing.
+
+## IMD's audit, fixed (collection job ea109756)
+
+IMD's judge found two money bugs in the collection, and two small ones; all four are fixed here, and the fixes moved the
+collection's addresses (re-mined, still `0x6900…`):
+
+- **High: ETH waiting to be bought into the floor (royalties, fees) was left out of the price.** Anyone could mint,
+  buy the ETH in, and sell straight back for a share of fees owed to holders. The mint price and the treasury price now
+  count that ETH (and WETH) at IMD's ETH pool price (`FrenSwapper.floorValue`). Proven:
+  `test_PendingEthCountsInTheMintPrice` fails on the old code (a 0.69 mint where 300 was due) and passes now.
+- **Medium: `$IMD` not swept in yet was in the mint price but not in the sale and treasury prices.** `recycle` and
+  `buyTreasury` sweep it in first now (`test_UnsweptImdCountsInTheTreasuryPrice`).
+- **Low: `approveJob` took a Permit2 nonce already spent**, stranding 0.50 `$IMD`. Refused now
+  (`test_KeeperCannotApproveASpentNonce`, `test_Fix_SpentNonceIsRefused`).
+- **Low: the script's `open()` / `resume()` could lock themselves out** if the pool moved 2x while floor buys were
+  paused. They warn instead now; `setup()` stays strict.
+- To keep the collection under EIP-170 with the fixes, `lowerMinTier` (a governance knob, unused) is gone: 24,441 of
+  24,576 bytes.
+- Mined salts carry no `f2`/`f4`/`ff` byte (gen.py), so a salt the compiler keeps as raw data can't trip the admission scan.
 
 ## The launches (`evm_contracts`, Ethereum, chain id 1)
 

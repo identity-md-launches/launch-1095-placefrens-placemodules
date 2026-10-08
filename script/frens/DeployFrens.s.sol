@@ -91,7 +91,7 @@ contract DeployFrens is Script {
         _requireFirstFrens(f);
         require(f.swapper() == swapper && f.workerGate() == gate, "modules differ from the launch");
         require(IPairExemption(PAIR_HOOK).feeExempt(swapper), "actual swapper is not fee-exempt");
-        _checkSwapper(swapper);
+        _warnSwapper(swapper);
         vm.broadcast(DEPLOYER);
         f.setParams(1, 50e18, 0.25 ether);
         console2.log("frens", frens, "floor buys resumed");
@@ -104,7 +104,7 @@ contract DeployFrens is Script {
         _requireFirstFrens(f);
         require(f.traitsSealed() && f.renderer().code.length != 0, "run setup first");
         require(f.swapper() == swapper && f.workerGate() == gate, "modules differ from the launch");
-        _checkSwapper(swapper);
+        _warnSwapper(swapper);
         vm.broadcast(DEPLOYER);
         f.setMintOpen(true);
     }
@@ -113,13 +113,24 @@ contract DeployFrens is Script {
         require(f.totalMinted() > f.inTreasury(), "mint the strategy's first frens before opening or resuming");
     }
 
-    /// @dev A later-block activation check; this does not prove the launch block's price was fair.
+    /// @dev A later-block activation check; this does not prove the launch block's price was fair. Strict at setup,
+    ///      right after the launch. Later ({open}, {resume}) the average may honestly lag: it stays at the launch's
+    ///      price while the floor's buys are paused, however far the pool moves, so there it only warns (IMD audit:
+    ///      a strict check there could lock both steps out).
     function _checkSwapper(address swapper) internal view {
-        if (POOL_MANAGER.code.length == 0) return;
+        require(_swapperInBand(swapper), "swapper average outside spot band");
+    }
+
+    function _warnSwapper(address swapper) internal view {
+        if (!_swapperInBand(swapper)) console2.log("WARNING: the swapper's average is more than 2x off the pool's price");
+    }
+
+    function _swapperInBand(address swapper) internal view returns (bool) {
+        if (POOL_MANAGER.code.length == 0) return true;
         FrenSwapper s = FrenSwapper(payable(swapper));
         uint256 avg = s.rateAverage();
         uint256 spot = s.spotRate();
-        require(avg != 0 && spot != 0 && avg * 2 >= spot && avg <= spot * 2, "swapper average outside spot band");
+        return avg != 0 && spot != 0 && avg * 2 >= spot && avg <= spot * 2;
     }
 
     /// @notice Where src/FrensPlacement.sol put them: read from the launch's PlaceModules (MODULES in the env), which

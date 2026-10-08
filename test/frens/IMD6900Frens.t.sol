@@ -109,6 +109,16 @@ contract MockSwapper is IFrenSwapper {
         got = msg.value * rate * 3000;
         out.mint(to, got);
     }
+
+    /// @dev ETH at the 3000 $IMD the ETH route above buys with it
+    function pendingImd(address holder) public view returns (uint256) {
+        return holder.balance * 3000;
+    }
+
+    function floorValue(uint256 r, address holder) external view returns (uint256 v) {
+        if (r != 0) v = r * 1e18 / (floorRateSet != 0 ? floorRateSet : rate * 1e18);
+        v += pendingImd(holder);
+    }
 }
 
 /// @dev A transfer validator that lets only `allowed` move frens between holders (or the holder itself, OTC)
@@ -123,6 +133,14 @@ contract RevertingSwapper is IFrenSwapper {
 
     function ethToImd6900(uint256, address) external payable returns (uint256) {
         revert("pool closed");
+    }
+
+    function pendingImd(address holder) external view returns (uint256) {
+        return holder.balance * 3000;
+    }
+
+    function floorValue(uint256 r, address holder) external view returns (uint256) {
+        return r * 1e18 / 70_000e18 + holder.balance * 3000;
     }
 }
 
@@ -364,21 +382,6 @@ contract IMD6900FrensTest is Test, FrensRules {
         vm.expectRevert(IMD6900Frens.TraitsAreSealed.selector);
         frens.addPairRule(IMD6900Frens.PairRule(0, PEPE, 3, GOLD, 3));
         vm.stopPrank();
-    }
-
-    /// @dev Unsold rares can be let down to lower tiers, never raised
-    function test_MinTierOnlyGoesDown() public {
-        vm.startPrank(timelock);
-        vm.expectRevert(IMD6900Frens.BadTraits.selector);
-        frens.lowerMinTier(0, MUMU, 3); // up
-        vm.expectRevert(IMD6900Frens.BadTraits.selector);
-        frens.lowerMinTier(0, MUMU, 2); // same
-        frens.lowerMinTier(0, MUMU, 1);
-        vm.stopPrank();
-        assertEq(frens.ruleOf(0, MUMU).minTier, 1);
-        vm.prank(alice);
-        vm.expectRevert(Ownable.Unauthorized.selector);
-        frens.lowerMinTier(0, BOBO, 0);
     }
 
     /* ── tiers ──────────────────────────────────────────────────── */
@@ -958,6 +961,56 @@ contract IMD6900FrensTest is Test, FrensRules {
         assertEq(frens.ownerOf(1), bob);
         (uint256 after_,) = frens.floorPerFren();
         assertGt(after_, f);
+    }
+
+    /// @dev IMD audit (high, dc3bd30d): ETH waiting to be bought into the floor (royalties, fees) counts in the mint
+    ///      price, so minting before it is bought in and selling straight back after earns nothing
+    function test_PendingEthCountsInTheMintPrice() public {
+        _floorOf(2);
+        (bool ok,) = address(frens).call{value: 0.2 ether}(""); // royalties waiting: 600 $IMD at the mock's ETH price
+        assertTrue(ok);
+        uint256 out = frens.totalMinted() - frens.inTreasury();
+        assertGe(frens.quote(1), (_floorValue() + 600e18) / out, "the mint pays its share of the waiting ETH");
+        uint256 before = imd.balanceOf(bob);
+        uint256 id = _request(bob);
+        uint256 paid = before - imd.balanceOf(bob);
+        vm.roll(vm.getBlockNumber() + 1);
+        vm.prank(makeAddr("anyone"));
+        frens.buyFloorWithEth(0.2 ether, 1);
+        assertEq(address(frens).balance, 0, "bought in");
+        uint256 tokenId = _first(id); // not in the recycle call: it would use up the prank
+        vm.prank(bob);
+        (uint256 got6900, uint256 gotImd) = frens.recycle(tokenId);
+        assertLe(got6900 / swapper.rate() + gotImd, paid, "nothing earned off the holders' fees");
+    }
+
+    /// @dev IMD audit (medium, b7d35d29): $IMD not swept in yet counts in the treasury price as in the sale price, so
+    ///      buying a fren out of the treasury, sweeping, and selling it straight back earns nothing
+    function test_UnsweptImdCountsInTheTreasuryPrice() public {
+        _floorOf(4);
+        vm.prank(alice);
+        frens.recycle(1);
+        imd.mint(address(frens), 500e18); // sent straight here (a job refund, a gift): not on the floor's books yet
+        imd6900.mint(bob, 1e30);
+        vm.startPrank(bob);
+        imd6900.approve(address(frens), type(uint256).max);
+        (uint256 paid6900, uint256 paidImd) = frens.buyTreasury(1, type(uint256).max, type(uint256).max);
+        assertGe(paidImd, 2 * (uint256(500e18) / 3), "it pays its share of the unswept $IMD, twice");
+        vm.roll(vm.getBlockNumber() + 1);
+        frens.buyFloor(0); // the sweep
+        (uint256 got6900, uint256 gotImd) = frens.recycle(1);
+        vm.stopPrank();
+        assertLe(got6900 / swapper.rate() + gotImd, paid6900 / swapper.rate() + paidImd, "nothing earned");
+    }
+
+    /// @dev IMD audit (low): a payment can't be approved over a Permit2 nonce already spent (its 0.50 $IMD would be
+    ///      stuck in the allowance for good)
+    function test_KeeperCannotApproveASpentNonce() public {
+        uint256 id = _request(alice);
+        permit2.spend(address(frens), 42); // nonce 42 spent
+        vm.prank(keeper);
+        vm.expectRevert(IMD6900Frens.BadJob.selector);
+        frens.approveJob(id, 42, block.timestamp + 600, _quote());
     }
 
     function test_BuyTreasuryRespectsMaxPay() public {

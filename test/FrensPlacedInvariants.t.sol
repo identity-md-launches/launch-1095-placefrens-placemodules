@@ -8,7 +8,7 @@ import {StdUtils} from "forge-std/StdUtils.sol";
 import {StdAssertions} from "forge-std/StdAssertions.sol";
 import {FrensPlan} from "../src/FrensPlan.sol";
 import {PlaceFrens} from "../src/FrensPlacement.sol";
-import {IMD6900Frens} from "../src/frens/IMD6900Frens.sol";
+import {IMD6900Frens, IFrenSwapper} from "../src/frens/IMD6900Frens.sol";
 import {FrensRules} from "./frens/FrensRules.sol";
 import {MockToken, NoZeroToken, MockPermit2, MockSwapper} from "./frens/IMD6900Frens.t.sol";
 import {PlainImd} from "./FrensLaunchFailures.t.sol";
@@ -253,7 +253,8 @@ contract PlacedFrensHandler is CommonBase, StdCheats, StdUtils, StdAssertions, F
         uint256 id = bound(tokenSeed, 1, total);
         address owner = frens.ownerOf(id);
         if (owner == address(frens)) return;
-        (uint256 p6900, uint256 pImd) = frens.floorPerFren();
+        // a sale sweeps the $IMD that arrived first, then pays its share of all of it
+        (uint256 p6900, uint256 pImd) = _floorParts();
         uint256 b6900 = imd6900.balanceOf(owner);
         uint256 bImd = imd.balanceOf(owner);
         vm.prank(owner);
@@ -263,6 +264,7 @@ contract PlacedFrensHandler is CommonBase, StdCheats, StdUtils, StdAssertions, F
             assertEq(imd6900.balanceOf(owner) - b6900, paid);
             assertEq(imd.balanceOf(owner) - bImd, imdPaid);
             ghost6900Out += paid;
+            ghostImdUnswept = 0; // swept
         } catch (bytes memory err) {
             assertTrue(false, string.concat("recycle reverted: ", vm.toString(err)));
         }
@@ -276,7 +278,9 @@ contract PlacedFrensHandler is CommonBase, StdCheats, StdUtils, StdAssertions, F
         uint256 id = bound(tokenSeed, 1, total);
         if (frens.ownerOf(id) != address(frens)) return;
         address a = actors[actorSeed % actors.length];
-        (uint256 p6900, uint256 pImd) = frens.floorPerFren();
+        // twice the floor, swept first, and twice the share of the ETH waiting to be bought in, in $IMD
+        (uint256 p6900, uint256 pImd) = _floorParts();
+        pImd += IFrenSwapper(frens.swapper()).floorValue(0, address(frens)) / _out();
         (p6900, pImd) = (2 * p6900, 2 * pImd);
         if (p6900 != 0) imd6900.mint(a, p6900);
         if (pImd != 0) imd.mint(a, pImd);
@@ -294,10 +298,21 @@ contract PlacedFrensHandler is CommonBase, StdCheats, StdUtils, StdAssertions, F
             assertEq(paid, p6900, "twice the floor");
             assertEq(imdPaid, pImd);
             ghost6900In += paid;
+            ghostImdUnswept = 0; // swept
         } catch (bytes memory err) {
             assertTrue(false, string.concat("buyTreasury reverted: ", vm.toString(err)));
         }
         assertEq(frens.ownerOf(id), a);
+    }
+
+    function _out() internal view returns (uint256 out) {
+        out = frens.totalMinted() - frens.inTreasury();
+        if (out == 0) out = 1;
+    }
+
+    /// @dev floorPerFren once the unswept $IMD is swept in, as recycle and buyTreasury do first
+    function _floorParts() internal view returns (uint256 p6900, uint256 pImd) {
+        (p6900, pImd) = (frens.reserve() / _out(), (frens.floorImd() + ghostImdUnswept) / _out());
     }
 
     function transfer(uint256 toSeed, uint256 tokenSeed) external {

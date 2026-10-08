@@ -23,6 +23,9 @@ interface IFrenSwapper {
     function imdToImd6900(uint256 imdIn, uint256 minOut, address to) external returns (uint256 out);
     function ethToImd6900(uint256 minOut, address to) external payable returns (uint256 out);
     function floorRate() external view returns (uint256); // IMD6900 per $IMD at its dearest (1e18)
+    function pendingImd(address holder) external view returns (uint256); // its ETH and WETH, in $IMD
+    /// @dev `reserve` IMD6900 at floorRate, plus `holder`'s ETH and WETH, in $IMD: what a floor is worth beside its $IMD
+    function floorValue(uint256 reserve, address holder) external view returns (uint256);
 }
 
 /// @notice The workers' window: the frens right after the opening go only to identity.md holders, one per NFT
@@ -253,7 +256,6 @@ contract IMD6900Frens is ERC721, Ownable, ReentrancyGuard {
         uint256 indexed requestId, uint256 indexed tokenId, uint24 combo, string imdJobId, bytes32 outputHash
     );
     event TraitsSealed();
-    event MinTierLowered(uint8 trait, uint8 value, uint8 minTier);
     event FloorBought(uint256 imdIn, uint256 ethIn, uint256 imd6900Out, uint256 reserve);
     event WethUnwrapped(uint256 amount);
     event Recycled(uint256 indexed tokenId, address indexed holder, uint256 paid, uint256 imdPaid);
@@ -410,14 +412,6 @@ contract IMD6900Frens is ERC721, Ownable, ReentrancyGuard {
         emit TraitsSealed();
     }
 
-    /// @notice Lets lower tiers take a value nobody above them did: it can only ever go down, never up.
-    function lowerMinTier(uint8 trait, uint8 value, uint8 minTier) external onlyGovernor {
-        Rule storage r = _rules[uint256(trait) << 8 | value];
-        if (trait >= TRAITS || value >= valuesOf(trait) || minTier >= r.minTier) revert BadTraits();
-        r.minTier = minTier;
-        emit MinTierLowered(trait, value, minTier);
-    }
-
     function ruleOf(uint8 trait, uint8 value) external view returns (Rule memory) {
         return _rules[uint256(trait) << 8 | value];
     }
@@ -502,8 +496,7 @@ contract IMD6900Frens is ERC721, Ownable, ReentrancyGuard {
         uint256 out = totalMinted - inTreasury();
         if (out != 0) {
             (uint256 value,) = _unswept();
-            value += floorImd;
-            if (reserve != 0) value += reserve * 1e18 / IFrenSwapper(swapper).floorRate();
+            value += floorImd + _floorValue(reserve);
             uint256 atFloor = count * value / out;
             if (atFloor > price) price = atFloor;
         }
@@ -719,7 +712,7 @@ contract IMD6900Frens is ERC721, Ownable, ReentrancyGuard {
     {
         Request storage r = requests[requestId];
         if (r.revealed == r.count) revert BadJob();
-        if (deadline > block.timestamp + 1 hours || q.expiresAt > block.timestamp + 1 hours) revert BadJob();
+        if (deadline > block.timestamp + 1 hours || q.expiresAt > block.timestamp + 1 hours || _spent(nonce)) revert BadJob();
         // the last payment can still be taken, or it is undone and its job money used again
         if (r.jobApproved && !_spent(r.jobNonce) && !_reclaimLapsed(r)) revert BadJob();
         if (r.jobs == 0) revert BadJob(); // the last job ran: another needs paying (retryJob)
@@ -808,7 +801,20 @@ contract IMD6900Frens is ERC721, Ownable, ReentrancyGuard {
     function floorPerFren() public view returns (uint256 imd6900Part, uint256 imdPart) {
         uint256 out = totalMinted - inTreasury();
         if (out == 0) out = 1; // with every fren in the treasury, one bought back costs twice all of it, never nothing
+        // the floor as booked: recycle and buyTreasury sweep the unswept $IMD in first, so they pay and charge it too
         (imd6900Part, imdPart) = (reserve / out, floorImd / out);
+    }
+
+    /// @dev `r` IMD6900 and the ETH and WETH here not bought in yet, in $IMD (IMD audit: a price that left the ETH
+    ///      out could be bought under and sold back over once it is bought in)
+    function _floorValue(uint256 r) internal view returns (uint256) {
+        return swapper == address(0) ? 0 : IFrenSwapper(swapper).floorValue(r, address(this));
+    }
+
+    /// @dev The unswept $IMD into the floor's books: before a price is read for a sale or a treasury buy
+    function _sweep() internal {
+        (uint256 extra,) = _unswept();
+        floorImd += extra;
     }
 
     /// @notice Buys the waiting $IMD into the reserve on the IMD6900/$IMD pool: up to maxImdPerBuy, one buy a block.
@@ -893,6 +899,7 @@ contract IMD6900Frens is ERC721, Ownable, ReentrancyGuard {
     ///         Any holder, any time.
     function recycle(uint256 tokenId) external nonReentrant returns (uint256 paid, uint256 imdPaid) {
         if (ownerOf(tokenId) != msg.sender) revert NotHolder();
+        _sweep();
         (paid, imdPaid) = floorPerFren();
         _transfer(msg.sender, address(this), tokenId);
         reserve -= paid;
@@ -911,7 +918,11 @@ contract IMD6900Frens is ERC721, Ownable, ReentrancyGuard {
         returns (uint256 paid, uint256 imdPaid)
     {
         if (ownerOf(tokenId) != address(this)) revert NotInTreasury();
+        _sweep();
         (paid, imdPaid) = floorPerFren();
+        // the ETH waiting to be bought in is the floor's too: a buyer pays its share, in $IMD
+        uint256 out = totalMinted - inTreasury();
+        imdPaid += _floorValue(0) / (out == 0 ? 1 : out);
         (paid, imdPaid) = (2 * paid, 2 * imdPaid);
         if (paid > maxPay || imdPaid > maxImd) revert Cap();
         if (paid != 0) SafeTransferLib.safeTransferFrom(imd6900, msg.sender, address(this), paid);
