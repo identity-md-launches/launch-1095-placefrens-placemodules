@@ -27,7 +27,7 @@ the gate's code (`ADAPTATION.md` lists them); the price table's didn't change.
   and checks each one's code hash on every read:
   - the IMD swarm's seven FrenArtChunk contracts, already on Ethereum: each character's 13 faces, the 2 hats and 14 of
     the 15 items, as the artist drew them;
-  - `WorkerArt1` and `WorkerArt2`, which this launch deploys: the artist's lab coat (3 coats x 6 shirts), the redrawn
+  - `WorkerArt1` and `WorkerArt2`, which the separate art launch deploys: the artist's lab coat (3 coats x 6 shirts), the redrawn
     item06, 12 backgrounds and the palettes. The backgrounds are Clean Lab and Messy Lab in blue, green and red, Tube
     in blue, green, red and yellow, and Wireframe in green and red.
 
@@ -51,8 +51,9 @@ the gate's code (`ADAPTATION.md` lists them); the price table's didn't change.
   when the request's reveal completes (or by anyone, `releaseLapsedJob`, if it lapses after), and its 0.50 feeds the floor.
 - **The floor.** Every fren out in the world owns an equal share of the floor (the IMD6900 reserve and the $IMD waiting
   to be bought into it); `recycle` sells a fren to the treasury for its share, `buyTreasury` buys one back at twice it.
-  A mint never costs less than the floor it joins ($IMD that arrived since the last buy counted), so minting and selling
-  straight back never pays. The last fren out in the world stays out (`LastFrenOut`): with every fren in the treasury the
+  Once at least one fren is out, a mint never costs less than the floor it joins ($IMD that arrived since the last buy
+  counted). Before that first mint this guarantee does not hold: the mandatory bootstrap order below gives the floor
+  its first owners before fees or public minting. The last fren out in the world stays out (`LastFrenOut`): with every fren in the treasury the
   floor would have no owner, and whoever minted next would take every fee that arrived meanwhile.
 
 ## How the addresses are fixed
@@ -67,8 +68,8 @@ the exact creation code:
 - `src/FrensPlan.sol` holds the constructor arguments, the mined salts and the addresses they give. The renderer has
   a salt but no planned address, because its constructor takes the art chunks' addresses, which come from IMD's
   deployer.
-- Regenerate both with `forge build && python3 script/placement/gen.py`. It keeps salts that still fit; `--remine`
-  mines new ones.
+- These bytes, settings and salts are pinned for this launch. Do not regenerate them: the queued Ethereum timelock
+  operation targets the current addresses, and the art depends on exact code hashes.
 
 Anyone can put these exact bytes at these addresses, and the launch takes the contract as it is, with one check: the
 swapper's slow price average is seeded from the IMD6900/$IMD pool's price in the block that creates it, so one placed in
@@ -95,16 +96,49 @@ Two launches, independent of each other (either may land first):
 
 ## After the launch (the team wallet)
 
-1. `setup()` points the collection at the art launch's renderer, wires the swapper and the gate (both read from the
-   collection launch's `PlaceModules`), then sets and seals the trait rules. While the collection isn't an IMD6900 distributor yet (the
-   batch below) it also pauses the floor's buys (`setParams(_, 0, 0)`): IMD6900 bought before that could never be paid
-   out, and every `recycle` and `buyTreasury` would fail on it. The floor waits in $IMD meanwhile.
+1. Read the confirmed collection launch's `PlaceModules` address. `MODULES` is required; missing or invalid values
+   fail, and individual `FRENS`, `SWAPPER`, `MINTER`, `GATE` environment values cannot override its getters. In a block
+   after deployment, check `rateAverage()` against `spotRate()` and an independently observed normal pool price.
+   Use a private relay for the collection launch; the constructor cannot detect manipulation of its own block's price.
+   `setup()` points the collection at the art launch's renderer, wires the reported swapper and gate, then sets and
+   seals the trait rules. It pauses floor buys (`setParams(_, 0, 0)`) whenever no fren is minted or the collection is
+   not yet an IMD6900 distributor. It also refuses an average outside the existing 2x spot band. This check is a
+   sanity check, not an independent oracle.
    `MODULES=<PlaceModules> RENDERER=<WorkerFrensRenderer> forge script script/frens/DeployFrens.s.sol --sig "setup()" --rpc-url … --account imdstr-deployer --broadcast`
-2. The WL: `gate.setWlRoot(root)`.
-3. The Ethereum timelock's batch for the new address (`script/frens/FrensTimelockBatch.s.sol`): the collection becomes
-   an IMD6900 distributor and the swapper trades fee-free. Once it has landed, `resume()` (same script, same env) turns
-   the floor's buys back on at the defaults (50 $IMD and 0.25 ETH a buy, one buy a block); it refuses to before.
-4. Open: `setMintOpen(true)` starts the workers' and WL's window, and the gate's `openPublic()` ends it early.
+2. **Mandatory before moving hook fees, resuming buys, or opening any mint window:** call
+   `firstFrens(frens, minter, count, ethIn)` in that script, with the confirmed collection and minter, a positive
+   team-selected count and sufficient ETH. This mints to the existing IMD6900 strategy while the public mint is
+   closed and buys are paused. Verify `balanceOf(IMD6900) > 0` and `totalMinted() > inTreasury()`. Do not route fees
+   or royalties here before this step. Unsolicited transfers cannot be prevented; if they already arrived, the
+   strategy must still receive the first frens before anyone else can mint. The pinned contract permits the governor
+   to bypass this order; the script guards do not remove that authority.
+3. Set the WL: `gate.setWlRoot(root)`. The script's `open()` starts the workers' and WL's window and refuses an empty
+   floor. It may run now with buys paused, or after the next step. Do not bypass it with an early `setMintOpen(true)`.
+4. Execute the Ethereum timelock batch (`script/frens/FrensTimelockBatch.s.sol`) only after step 2. Check
+   `PlaceModules.swapper() == FrensPlan.SWAPPER_AT` before relying on the already queued batch. If the launch replaced
+   the swapper, queue and execute the fee exemption for the **actual** swapper; the existing batch's exemption is
+   insufficient. Verify distributor status and `PAIR_HOOK.feeExempt(actualSwapper)`, then run `resume()` with the
+   same `MODULES`. It verifies both, the wiring, the first frens and the price band before restoring the defaults
+   (50 $IMD and 0.25 ETH a buy, one buy a block).
+5. The gate's `openPublic()` ends the workers' window early. The optional `handover(frens)` moves governorship to the
+   timelock after setup and activation; ownership stays with the team wallet.
+
+If the launch's own swapper was seeded at a pushed price, leave minting closed and buys paused. The governor can
+deploy the unchanged `FrenSwapper` with FrensPlan's pool/token/hook arguments and the confirmed collection address in
+a normal-price block, validate its average, and call `setModules(newSwapper, existingGate)`. Queue its fee exemption
+and wait for execution before restoring buys. This is a manual recovery: the normal script deliberately refuses
+wiring that differs from `PlaceModules`. Do not rerun `setup()` over the recovered wiring. A private relay policy
+has not been confirmed by this adaptation.
+
+List the collection for **ETH/WETH settlement only**. The pinned royalty receiver has no arbitrary ERC-20 rescue;
+USDC, DAI or other unsupported royalties would be stranded. Directly sent IMD6900 is not booked as reserve. Existing
+$IMD receipts do have the floor's sweep path.
+
+The keeper must allocate Permit2 nonces persistently per chain and collection, including across restarts and pending
+jobs. Before every `approveJob`, read `nonceBitmap(frens, nonce >> 8)` and require
+`bitmap & (1 << (nonce & 255)) == 0`; never reuse a nonce already assigned to another pending job. A spent nonce is
+not rejected by this pinned collection and strands the job's 0.50 $IMD allowance. This is an unresolved contract
+finding, not a protection supplied by the script; no keeper implementation was supplied here to patch.
 
 ## Tests
 

@@ -24,6 +24,10 @@ interface IStrategyMin {
     function isDistributor(address) external view returns (bool);
 }
 
+interface IPairExemption {
+    function feeExempt(address) external view returns (bool);
+}
+
 /// @notice The frens after the IMD swarm's two launches (the collection: src/FrensPlacement.sol, at FrensPlan's
 ///         addresses; the art: WorkerArt1, WorkerArt2 and WorkerFrensRenderer): the team wallet (owner and governor)
 ///         wires them, points them at the art launch's renderer, mints the curve's first frens to IMD6900 and hands the
@@ -62,10 +66,11 @@ contract DeployFrens is Script {
     ///         turns the buys back on once the batch has landed.
     function setup() external {
         (address frens, address swapper,, address gate) = placed();
-        address renderer = vm.envAddress("RENDERER");
+        address renderer = _renderer();
         require(renderer.code.length != 0, "no renderer at RENDERER");
         IMD6900Frens f = IMD6900Frens(payable(frens));
-        bool paused = !IStrategyMin(IMD6900).isDistributor(frens);
+        _checkSwapper(swapper);
+        bool paused = f.totalMinted() == 0 || !IStrategyMin(IMD6900).isDistributor(frens);
         vm.startBroadcast(DEPLOYER);
         f.setRenderer(renderer);
         if (paused) f.setParams(f.buyDelayBlocks(), 0, 0);
@@ -74,40 +79,86 @@ contract DeployFrens is Script {
         f.sealTraits();
         vm.stopBroadcast();
         console2.log("frens", frens, "set up, sealed, drawn by", renderer);
-        if (paused) console2.log("floor buys paused until the timelock's batch (FrensTimelockBatch); then resume()");
+        if (paused) console2.log("floor buys paused: firstFrens(), then the timelock batch, then resume()");
     }
 
     /// @notice Once the timelock's batch has made the frens an IMD6900 distributor: the floor's buys back on, at the
     ///         collection's defaults (50 $IMD and 0.25 ETH a buy, one buy a block)
     function resume() external {
-        (address frens,,,) = placed();
+        (address frens, address swapper,, address gate) = placed();
         require(IStrategyMin(IMD6900).isDistributor(frens), "not an IMD6900 distributor yet: the batch hasn't landed");
+        IMD6900Frens f = IMD6900Frens(payable(frens));
+        _requireFirstFrens(f);
+        require(f.swapper() == swapper && f.workerGate() == gate, "modules differ from the launch");
+        require(IPairExemption(PAIR_HOOK).feeExempt(swapper), "actual swapper is not fee-exempt");
+        _checkSwapper(swapper);
         vm.broadcast(DEPLOYER);
-        IMD6900Frens(payable(frens)).setParams(1, 50e18, 0.25 ether);
+        f.setParams(1, 50e18, 0.25 ether);
         console2.log("frens", frens, "floor buys resumed");
     }
 
+    /// @notice Open the workers' and WL's window only after the strategy holds the first frens.
+    function open() external {
+        (address frens, address swapper,, address gate) = placed();
+        IMD6900Frens f = IMD6900Frens(payable(frens));
+        _requireFirstFrens(f);
+        require(f.traitsSealed() && f.renderer().code.length != 0, "run setup first");
+        require(f.swapper() == swapper && f.workerGate() == gate, "modules differ from the launch");
+        _checkSwapper(swapper);
+        vm.broadcast(DEPLOYER);
+        f.setMintOpen(true);
+    }
+
+    function _requireFirstFrens(IMD6900Frens f) internal view {
+        require(f.totalMinted() > f.inTreasury(), "mint the strategy's first frens before opening or resuming");
+    }
+
+    /// @dev A later-block activation check; this does not prove the launch block's price was fair.
+    function _checkSwapper(address swapper) internal view {
+        if (POOL_MANAGER.code.length == 0) return;
+        FrenSwapper s = FrenSwapper(payable(swapper));
+        uint256 avg = s.rateAverage();
+        uint256 spot = s.spotRate();
+        require(avg != 0 && spot != 0 && avg * 2 >= spot && avg <= spot * 2, "swapper average outside spot band");
+    }
+
     /// @notice Where src/FrensPlacement.sol put them: read from the launch's PlaceModules (MODULES in the env), which
-    ///         knows its swapper even where it had to create its own instead of the one at FrensPlan.SWAPPER_AT; else
-    ///         FrensPlan's addresses. FRENS / SWAPPER / MINTER / GATE in the env override either.
+    ///         knows its swapper even where it had to create its own instead of the one at FrensPlan.SWAPPER_AT.
+    ///         MODULES is required. Individual address overrides cannot replace the launch's reported contracts.
     function placed() public view returns (address frens, address swapper, address minter, address gate) {
-        address modules = vm.envOr("MODULES", address(0));
+        address modules = _modules();
+        require(modules.code.length != 0, "MODULES must be the collection launch's PlaceModules");
         IPlacedModules pm = IPlacedModules(modules);
-        bool fromLaunch = modules.code.length != 0;
-        frens = vm.envOr("FRENS", fromLaunch ? pm.frens() : FrensPlan.FRENS_AT);
-        swapper = vm.envOr("SWAPPER", fromLaunch ? pm.swapper() : FrensPlan.SWAPPER_AT);
-        minter = vm.envOr("MINTER", fromLaunch ? pm.minter() : FrensPlan.MINTER_AT);
-        gate = vm.envOr("GATE", fromLaunch ? pm.gate() : FrensPlan.GATE_AT);
+        (frens, swapper, minter, gate) = (pm.frens(), pm.swapper(), pm.minter(), pm.gate());
         require(
             frens.code.length != 0 && swapper.code.length != 0 && minter.code.length != 0 && gate.code.length != 0,
             "not placed"
         );
+        if (block.chainid == 1) require(frens == FrensPlan.FRENS_AT, "wrong Ethereum collection");
+        require(
+            FrenSwapper(payable(swapper)).frens() == frens && address(FrenMinter(payable(minter)).frens()) == frens
+                && FrenWorkerGate(gate).frens() == frens,
+            "modules belong to another collection"
+        );
+    }
+
+    function _modules() internal view virtual returns (address) {
+        return vm.envOr("MODULES", address(0));
+    }
+
+    function _renderer() internal view virtual returns (address) {
+        return vm.envAddress("RENDERER");
     }
 
     /// @notice The curve's first `count` frens to IMD6900 (its seats hold identity.md NFTs), 69 a request, paid with
     ///         the ETH sent: FrenMinter buys exactly their price in $IMD on POOL4 first. Before the opening only.
     function firstFrens(IMD6900Frens frens, FrenMinter minter, uint256 count, uint256 ethIn) external {
         require(!frens.mintOpen(), "before the opening only");
+        require(count != 0, "no first frens requested");
+        require(address(minter.frens()) == address(frens), "minter belongs to another collection");
+        if (frens.totalMinted() == 0) {
+            require(frens.maxImdPerBuy() == 0 && frens.maxEthPerBuy() == 0, "run setup to pause floor buys first");
+        }
         uint256 cost;
         for (uint256 n = frens.totalMinted(); n < frens.totalMinted() + count; ++n) {
             cost += frens.priceOf(n);

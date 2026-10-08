@@ -42,7 +42,6 @@ interface IHookFees {
     function feeAddress() external view returns (address);
 }
 
-
 /// @dev What IMD's `evm_contracts` launches do: each launch's contracts in order from IMD's deployer, in one
 ///      transaction, constructors only, a later one given an earlier one's address (`$contract:…`), nothing called
 ///      after. Two launches: the collection (PlaceFrens, PlaceModules), then the art (WorkerArt1, WorkerArt2,
@@ -306,8 +305,12 @@ contract FrensPlacementTest is Test {
         art[0] = type(WorkerArt1).creationCode;
         art[1] = type(WorkerArt2).creationCode;
         art[2] = abi.encodePacked(type(WorkerFrensRenderer).creationCode, abi.encode(address(1), address(2)));
-        for (uint256 i; i < collection.length; ++i) assertLt(collection[i].length, INITCODE_CAP, "a collection contract");
-        for (uint256 i; i < art.length; ++i) assertLt(art[i].length, INITCODE_CAP, "an art contract");
+        for (uint256 i; i < collection.length; ++i) {
+            assertLt(collection[i].length, INITCODE_CAP, "a collection contract");
+        }
+        for (uint256 i; i < art.length; ++i) {
+            assertLt(art[i].length, INITCODE_CAP, "an art contract");
+        }
 
         ImdStyleDeployer d = new ImdStyleDeployer();
         uint256 g = gasleft();
@@ -331,7 +334,9 @@ contract FrensPlacementTest is Test {
         uint256 tokens;
         for (uint256 i; i < codes.length; ++i) {
             bytes_ += codes[i].length;
-            for (uint256 k; k < codes[i].length; ++k) tokens += codes[i][k] == 0 ? 1 : 4;
+            for (uint256 k; k < codes[i].length; ++k) {
+                tokens += codes[i][k] == 0 ? 1 : 4;
+            }
         }
         uint256 standard = 21_000 + 4 * tokens + creations + 300_000 + 7 * bytes_; // the launcher: 300,000 + 7 a byte
         uint256 floor = 21_000 + 10 * tokens; // EIP-7623
@@ -674,7 +679,8 @@ contract FrensPlacementForkTest is Test, FrensRules {
             b.batch(FrensPlan.FRENS_AT, FrensPlan.SWAPPER_AT, true, false);
         assertEq(targets.length, 3, "no setMintOpen in it");
         ITimelockController tl = ITimelockController(b.TIMELOCK());
-        bytes32 salt = b.SALT();
+        // A test-only operation identity: the production SALT may already be queued on the fork.
+        bytes32 salt = keccak256(abi.encode("worker-frens-test-workers-first", address(this), block.number));
         vm.prank(OWNER);
         tl.scheduleBatch(targets, values, datas, bytes32(0), salt, 48 hours);
 
@@ -682,10 +688,12 @@ contract FrensPlacementForkTest is Test, FrensRules {
         address wl = makeAddr("a WL wallet");
         s.setup();
         assertEq(frens.maxImdPerBuy(), 0, "floor buys paused");
+        s.firstFrens(frens, minter, 6, 0.05 ether);
+        assertEq(frens.balanceOf(s.IMD6900()), 6, "the floor has owners before fees or public minting");
         vm.startPrank(OWNER);
         gate.setWlRoot(keccak256(bytes.concat(keccak256(abi.encode(wl, uint256(2)))))); // a one-wallet list: root = leaf
-        frens.setMintOpen(true);
         vm.stopPrank();
+        s.open();
 
         // the WL wallet mints in the window with ETH; a wallet without credits can't
         vm.prank(wl);

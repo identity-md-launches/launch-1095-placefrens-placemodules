@@ -79,6 +79,12 @@ contract PlainImd is MockToken {
 /// @notice The launch's failure paths: a deployer that isn't the standard one, modules over the wrong frens, ETH sent
 ///         to the launch, a second launch, what nobody but the team wallet may do, and the collection before the team
 ///         wallet has set it up. Plus fuzzed properties of the price table and the quote the placed collection serves.
+contract UnconfiguredFrensScript is DeployFrens {
+    function _modules() internal pure override returns (address) {
+        return address(0);
+    }
+}
+
 contract FrensLaunchFailuresTest is Test, FrensRules {
     bytes constant CREATE2_DEPLOYER_CODE =
         hex"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3";
@@ -236,11 +242,11 @@ contract FrensLaunchFailuresTest is Test, FrensRules {
     /// @dev The script that wires the frens after the launch refuses a chain where they aren't placed
     function test_ScriptRefusesAnUnplacedChain() public {
         vm.etch(FrensPlan.CREATE2_DEPLOYER, "");
-        DeployFrens s = new DeployFrens();
-        vm.expectRevert(bytes("not placed"));
+        DeployFrens s = new UnconfiguredFrensScript();
+        vm.expectRevert(bytes("MODULES must be the collection launch's PlaceModules"));
         s.placed();
         _run(makeAddr("fresh chain deployer"));
-        vm.expectRevert(bytes("not placed"));
+        vm.expectRevert(bytes("MODULES must be the collection launch's PlaceModules"));
         s.placed(); // the fresh chain's addresses aren't the plan's
     }
 
