@@ -143,6 +143,21 @@ contract FrensLaunchAdaptationTest is FrensReviewBase {
         script.firstFrens(frens, minter, 0, 0);
     }
 
+    /// @dev The ea109756 repair: a legitimate price move while buys are paused must not lock out activation.
+    function test_OpenAndResumeWarnWhenAverageLags() public {
+        FrensSlot0Stub pool = _replaceModulesAtPrice(uint160((uint256(1) << 96) / 265));
+        script.setup();
+        _first();
+        pool.setPrice(uint160((uint256(1) << 96) / 26));
+        FrenSwapper swapper = FrenSwapper(payable(pm.swapper()));
+        assertGt(swapper.rateAverage(), 2 * swapper.spotRate());
+        script.open();
+        script.resume();
+        assertTrue(frens.mintOpen());
+        assertEq(frens.maxImdPerBuy(), 50e18);
+        assertEq(frens.maxEthPerBuy(), 0.25 ether);
+    }
+
     function test_ResumeRequiresDistributorAndActualSwapperExemption() public {
         script.setup();
         _first();

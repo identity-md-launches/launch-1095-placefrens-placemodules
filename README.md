@@ -51,8 +51,10 @@ the gate's code (`ADAPTATION.md` lists them); the price table's didn't change.
   when the request's reveal completes (or by anyone, `releaseLapsedJob`, if it lapses after), and its 0.50 feeds the floor.
 - **The floor.** Every fren out in the world owns an equal share of the floor (the IMD6900 reserve and the $IMD waiting
   to be bought into it); `recycle` sells a fren to the treasury for its share, `buyTreasury` buys one back at twice it.
-  Once at least one fren is out, a mint never costs less than the floor it joins ($IMD that arrived since the last buy
-  counted). Before that first mint this guarantee does not hold: the mandatory bootstrap order below gives the floor
+  Once at least one fren is out, the mint price counts the reserve, waiting and unswept $IMD, and pending ETH/WETH.
+  This is not an unconditional floor guarantee: pending ETH uses POOL4's manipulable spot price, and removing the
+  swapper makes the reserve count as zero (the retained audit findings are in `ADAPTATION.md`). Before that first mint,
+  the mandatory bootstrap order below gives the floor
   its first owners before fees or public minting. The last fren out in the world stays out (`LastFrenOut`): with every fren in the treasury the
   floor would have no owner, and whoever minted next would take every fee that arrived meanwhile.
 
@@ -95,16 +97,22 @@ collection's addresses (re-mined, still `0x6900…`):
 - **Low: `approveJob` took a Permit2 nonce already spent**, stranding 0.50 `$IMD`. Refused now
   (`test_KeeperCannotApproveASpentNonce`, `test_Fix_SpentNonceIsRefused`).
 - **Low: the script's `open()` / `resume()` could lock themselves out** if the pool moved 2x while floor buys were
-  paused. They warn instead now; `setup()` stays strict.
+  paused. They warn instead now; `setup()` stays strict (`test_OpenAndResumeWarnWhenAverageLags`).
 - To keep the collection under EIP-170 with the fixes, `lowerMinTier` (a governance knob, unused) is gone: 24,441 of
   24,576 bytes.
 - Mined salts carry no `f2`/`f4`/`ff` byte (gen.py), so a salt the compiler keeps as raw data can't trip the admission scan.
 
+The follow-up audit reproduces four remaining MEDIUM/LOW contract findings: pending ETH valued at spot, dust pinning
+the swapper average, duplicate pending Permit2 nonces, and reserve underpricing if the governor removes the swapper.
+These remain unchanged by the requester's address-preservation decision. `ADAPTATION.md` records the evidence and
+limits; passing `test_Risk_...` tests demonstrate those risks still exist.
+
 ## The launches (`evm_contracts`, Ethereum, chain id 1)
 
-Two launches, independent of each other (either may land first):
+The collection is this assignment's launch. The independent art launch has already landed (IMD launch 1067,
+renderer `0x0a2e5e0c1d00fe63ab4e391c052a023cc7a16292`):
 
-- **The collection** (about 12.3M gas, all in):
+- **The collection** (about 12.45M gas, all in):
   1. `PlaceFrens` (no constructor arguments): the price table and the collection, for the team wallet
      `0x35dA9C0303507ddf708E87F2568EdDf12c47a059` (owner and governor).
   2. `PlaceModules`, with one argument, `$contract:PlaceFrens`: the swapper, the ETH minter and the gate.
@@ -137,7 +145,8 @@ Two launches, independent of each other (either may land first):
    `PlaceModules.swapper() == FrensPlan.SWAPPER_AT` before relying on the already queued batch. If the launch replaced
    the swapper, queue and execute the fee exemption for the **actual** swapper; the existing batch's exemption is
    insufficient. Verify distributor status and `PAIR_HOOK.feeExempt(actualSwapper)`, then run `resume()` with the
-   same `MODULES`. It verifies both, the wiring, the first frens and the price band before restoring the defaults
+   same `MODULES`. It verifies both, the wiring and the first frens, and warns if the price average is outside the
+   2x spot band before restoring the defaults
    (50 $IMD and 0.25 ETH a buy, one buy a block).
 5. The gate's `openPublic()` ends the workers' window early. The optional `handover(frens)` moves governorship to the
    timelock after setup and activation; ownership stays with the team wallet.
@@ -155,9 +164,14 @@ $IMD receipts do have the floor's sweep path.
 
 The keeper must allocate Permit2 nonces persistently per chain and collection, including across restarts and pending
 jobs. Before every `approveJob`, read `nonceBitmap(frens, nonce >> 8)` and require
-`bitmap & (1 << (nonce & 255)) == 0`; never reuse a nonce already assigned to another pending job. A spent nonce is
-not rejected by this pinned collection and strands the job's 0.50 $IMD allowance. This is an unresolved contract
-finding, not a protection supplied by the script; no keeper implementation was supplied here to patch.
+`bitmap & (1 << (nonce & 255)) == 0`; never reuse a nonce already assigned to another pending job. The collection
+rejects spent nonces, but accepts duplicate pending nonces: settling one can strand the other's 0.50 $IMD allowance.
+Persistent unique allocation remains necessary; no keeper implementation was supplied here to patch.
+
+Keep a valid swapper wired while a reserve exists. For replacement, close minting before changing modules and wire
+the replacement directly; do not leave an open mint with `swapper == address(0)`. This operator precaution does not
+remove the governor's authority to bypass it. Pending ETH/WETH and a dust-pinned average remain price risks even
+with the intended wiring; the setup script's pair-price band does not protect POOL4's spot valuation.
 
 ## Tests
 
@@ -177,7 +191,7 @@ finding, not a protection supplied by the script; no keeper implementation was s
 
     | launch | contracts (initcode) | gas, all in |
     |---|---|---|
-    | the collection | PlaceFrens (40.8 KB), PlaceModules | 12.3M |
+    | the collection | PlaceFrens (40.8 KB), PlaceModules | 12.45M |
     | the art | WorkerArt1 (28.5 KB), WorkerArt2 (21.9 KB), WorkerFrensRenderer (17.4 KB) | 13.6M |
   - IMD's admission scan is clean for every contract. The art chunks are framed (a PUSH32 byte before every 32 bytes),
     and the renderer keeps its index and code hashes as hex text;
@@ -194,6 +208,10 @@ finding, not a protection supplied by the script; no keeper implementation was s
   root, the shared 420, never more than 420).
 - `test/frens/FrenSwapperAverage.t.sol`: the swapper's slow average moves a full step for a full buy, next to nothing
   for dust.
+- `test/FrensResidualRisks.t.sol`: passing reproductions of the four retained MEDIUM/LOW findings using the pinned
+  collection and swapper code, plus an averaging probe. They assert the vulnerable behavior, not its repair.
+- `python3 test/test_collection_manifest.py`: checks the two factory entries, current addresses across the plan,
+  generated address file and handoff documents, the live renderer, and salt bytes against the admission restriction.
 - `test/frens/`: the collection's own tests (minting, tiers, reveals, the floor, the last fren out, unswept $IMD, lapsed
   job payments, Permit2 and x402 payments, the transfer validator).
 
