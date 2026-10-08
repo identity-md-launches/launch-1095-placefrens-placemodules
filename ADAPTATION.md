@@ -158,3 +158,58 @@ The supplied protected probe has exact pragma 0.8.26 while the project pins solc
 rehearses the same constructor-only CREATE2 interface under the unchanged project compiler, and existing admission
 checks cover sizes, opcodes, code/source identity and deterministic addresses. This targeted local review does not
 independently audit external mainnet hooks, validator, x402 service, keeper or deployed art.
+
+## Revision review (reopened findings)
+
+This revision adds `test/FrensRevisionRisks.t.sol` and `.imd-responses.json`, and appends this disposition.
+It leaves the accepted implementation, handoff, dependencies, build configuration, creation code and salts unchanged.
+All runtime reports remain MEDIUM/LOW/INFO. The explicit severity decision in the brief therefore takes precedence
+ over the reviewer's request to change those contracts. In the response file, **disputed** means the requested
+runtime repair is outside that decision; it does **not** deny the reproduced behavior. No HIGH/CRITICAL finding
+was established and no re-mining is warranted. All Ethereum addresses above remain the launch targets.
+
+The new tests are passing retained-risk reproductions, not assertions that these defects have been fixed. They reuse
+ the accepted pinned collection fixture; the real unchanged minter and swapper are compiled from source. External
+services are mocked and no `.imd/reads` dependency is delivered.
+
+| Report (ID prefix) | Severity | Reproduction and disposition |
+| --- | --- | --- |
+| `ee6e9563b9b6` | MEDIUM | `test_Risk_EthMintPushesItsOwnPendingEthPrice`: the real minter quotes before its exact-output purchase and the collection charges after it; over 600 IMD returns to the caller rather than joining the floor. With the modeled pool restored, the original holders' share falls by over 30%. `test_Risk_PushMintUnpushHasPositiveMarkedValue` also confirms a positive surplus after round-trip pool fees. Retained under the severity decision. This strengthens the earlier `a99c13dac6ce` disposition: economic profitability is now validated in the stated offline model, not independently on mainnet. |
+| `9b93b3d8000c` | LOW | `test_Risk_RecycleOmitsPendingEthPricedByTreasury`: recycling leaves 1 ETH untouched and pays no share of it; treasury purchase then charges 6000 IMD for it with one fren still out. Retained; pending ETH/WETH is not an in-kind recycle payout. |
+| `ba73b30a216c` | LOW | `test_Risk_FloorViewOmitsJobRefund`: a 0.25 IMD refund leaves the public view's IMD part at zero, treasury purchase with the view's cap reverts, and recycling actually pays 0.125 IMD. Retained; integrations must account for unswept IMD separately. |
+| `21f3364d019f` | LOW | `test_Risk_DustEthTakesFiftyBlockTurns`: fifty one-wei buys succeed and block the full ETH buy each time with TooSoon, leaving 10 ETH minus 50 wei pending. Retained; permissionless ETH pacing remains susceptible to a gas-funded inclusion race. |
+| `505ce07ea6ca` | LOW | `test_Risk_FloorQuotesUseExtremeLimits`: the quote mock requires the extreme limits on both legs; real minter quotes succeed even with collection buy caps at zero. The actual swapper's exposed limits are different. Retained; these are unlimited pool quotes, not safe minimum outputs for bounded floor buys. No mainnet output-size measurements were re-run, and the test does not assert every small real buy reverts. |
+| `661c7f77e56f` | INFO | `test_Risk_PayeeChangeLeavesExpiredPermitDigest`: change payee during approval, expire and reclaim, then approve anew; allowance represents only one payment but the old digest still validates. Retained; the expired deadline prevents payment, so this is signature residue. |
+| `96b5888fce79` | INFO | `test_Risk_StrangerSpendsWorkersCredit`: a different payer pays for the worker, consuming their WL credit; the worker receives the fren and subsequently gets NoCredit. Confirmed design/timing limitation, retained. |
+| `d598eeb184bb` | INFO | `test_Risk_ZeroOrOneFeeLimitEqualsCurrentPrice`: fees 0 and 1 both produce zero move and limits equal to slot0 in both directions. Retained external-hook dependency. The full v4 Pool implementation is not vendored, so the downstream PriceLimitAlreadyExceeded revert was not executed locally. |
+| `074e8720e810` | INFO | `test_Risk_FloorBoundJobCostIsSocialised`: with 100 frens out, mint/recycle loses approximately 0.50/101 IMD for the caller; existing holders bear the rest. Confirmed documented economics, retained; the cycle does not generate caller profit. |
+
+The constant-product POOL4 starts with 23.37 ETH and 7400 IMD, charges 1% on each input and reports spot from
+its reserves. Its unlock/settle/take path drives the actual FrenMinter; collection minting occurs after unlock closes.
+The external push/unpush test models reserve arithmetic and marks the new frens at restored pending-asset value;
+it does not custody the attacker's push tokens or execute an immediate profitable recycle. Real hook burns,
+concentrated liquidity, arbitrage execution and eventual ETH conversion may affect realized returns. This evidence
+supports the reported bounded MEDIUM dilution exposure without claiming mainnet execution or upgrading severity.
+The socialized job cost is a separate effect; the ETH mint share loss greatly exceeds that job's contribution.
+
+The six imported reports were checked again against the accepted work: the four existing retained-risk tests still
+reproduce their findings; the factory/review tests retain the documented powers. `282a96c15807` does **not** reproduce
+on this revision's starting tree: the accepted manifest, report and Python test already use the re-mined addresses.
+It is answered `not_reproducible` for this round rather than claiming a new repair. The previous-round documentation
+of its historical reproduction and repair remains above.
+
+### Revision validation
+
+- `forge build`: passed with the existing configuration and compiler/lint warnings (Forge 1.8.3, solc 0.8.30).
+- `forge test`: **209 passed, 0 failed, 5 skipped** across 20 suites. The skipped suites require mainnet RPC;
+  no fork measurements are claimed. Factory ownership, deterministic addresses, admission scans, launch gas bounds,
+  existing regressions and invariants continue to pass.
+- `forge test --match-path test/FrensRevisionRisks.t.sol -vv`: **13 passed**, comprising ten new tests for the nine
+  reopened runtime reports and three inherited accepted reproductions. Model ETH mint: shown
+  **1587.628858579375267300 IMD**, paid **979.046693648650397080**, refunded **608.582164930724870220**.
+  Push/mint/unpush: **0.135188802651085725 ETH** round-trip cost, **106.904119598384566859 IMD** marked surplus.
+- `python3 test/test_collection_manifest.py`: **4 passed**; the response JSON parses and contains all 15 unique
+  finding IDs with allowed verdicts and nonempty details. `git diff --check` passed.
+- Only `ADAPTATION.md`, `test/FrensRevisionRisks.t.sol` and the required `.imd-responses.json` were written by this
+  revision. No production/deployment/configuration/dependency path was changed; no install, re-mining, key access,
+  network access or transaction broadcast was needed. All retained runtime findings remain open as documented.
