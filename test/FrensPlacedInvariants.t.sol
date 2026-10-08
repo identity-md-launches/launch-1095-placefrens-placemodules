@@ -106,11 +106,8 @@ contract PlacedFrensHandler is CommonBase, StdCheats, StdUtils, StdAssertions, F
     function mintThenRecycle(uint256 actorSeed) external {
         calls["mintThenRecycle"]++;
         if (frens.totalMinted() == SUPPLY) return;
-        // With every fren in the treasury the quote is the curve while the floor pays the whole reserve: a reported
-        // defect (see .imd-findings.json, "empty world"), not a property this suite asserts either way.
-        if (frens.totalMinted() - frens.inTreasury() == 0) return;
-        // $IMD sent to the contract joins the floor at the next buy, after the quote was read: skipped too.
-        if (ghostImdUnswept != 0) return;
+        // Bootstrap has no existing floor holders. Once minted, LastFrenOut keeps at least one in the world.
+        if (frens.totalMinted() == 0) return;
         address a = actors[actorSeed % actors.length];
         uint256 paid = frens.quote(1);
         uint256 id = _mintFor(a, 1, false);
@@ -253,6 +250,15 @@ contract PlacedFrensHandler is CommonBase, StdCheats, StdUtils, StdAssertions, F
         uint256 id = bound(tokenSeed, 1, total);
         address owner = frens.ownerOf(id);
         if (owner == address(frens)) return;
+        if (total - frens.inTreasury() == 1) {
+            bytes32 beforeState = _floorSnapshot(owner, id);
+            vm.prank(owner);
+            vm.expectRevert(IMD6900Frens.LastFrenOut.selector);
+            frens.recycle(id);
+            assertEq(_floorSnapshot(owner, id), beforeState, "last-fren refusal rolls back the sweep and payout");
+            calls["lastRecycleRejected"]++;
+            return;
+        }
         // a sale sweeps the $IMD that arrived first, then pays its share of all of it
         (uint256 p6900, uint256 pImd) = _floorParts();
         uint256 b6900 = imd6900.balanceOf(owner);
@@ -286,12 +292,20 @@ contract PlacedFrensHandler is CommonBase, StdCheats, StdUtils, StdAssertions, F
         if (pImd != 0) imd.mint(a, pImd);
         // one wei short on either part: refused
         if (p6900 != 0) {
+            bytes32 beforeState = _floorSnapshot(a, id);
             vm.prank(a);
-            try frens.buyTreasury(id, p6900 - 1, pImd) {
-                assertTrue(false, "bought from the treasury for less than twice the floor");
-            } catch (bytes memory err) {
-                assertEq(bytes4(err), IMD6900Frens.Cap.selector, "refused as Cap");
-            }
+            vm.expectRevert(IMD6900Frens.Cap.selector);
+            frens.buyTreasury(id, p6900 - 1, pImd);
+            assertEq(_floorSnapshot(a, id), beforeState, "short reserve cap rolls back the sweep and payment");
+            calls["reserveCapRejected"]++;
+        }
+        if (pImd != 0) {
+            bytes32 beforeState = _floorSnapshot(a, id);
+            vm.prank(a);
+            vm.expectRevert(IMD6900Frens.Cap.selector);
+            frens.buyTreasury(id, p6900, pImd - 1);
+            assertEq(_floorSnapshot(a, id), beforeState, "short IMD cap rolls back the sweep and payment");
+            calls["imdCapRejected"]++;
         }
         vm.prank(a);
         try frens.buyTreasury(id, p6900, pImd) returns (uint256 paid, uint256 imdPaid) {
@@ -310,6 +324,24 @@ contract PlacedFrensHandler is CommonBase, StdCheats, StdUtils, StdAssertions, F
         if (out == 0) out = 1;
     }
 
+    function _floorSnapshot(address actor, uint256 id) internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                frens.ownerOf(id),
+                frens.inTreasury(),
+                frens.totalMinted(),
+                frens.reserve(),
+                frens.floorImd(),
+                frens.jobBudget(),
+                imd.balanceOf(address(frens)),
+                imd6900.balanceOf(address(frens)),
+                imd.balanceOf(actor),
+                imd6900.balanceOf(actor),
+                address(frens).balance
+            )
+        );
+    }
+
     /// @dev floorPerFren once the unswept $IMD is swept in, as recycle and buyTreasury do first
     function _floorParts() internal view returns (uint256 p6900, uint256 pImd) {
         (p6900, pImd) = (frens.reserve() / _out(), (frens.floorImd() + ghostImdUnswept) / _out());
@@ -322,8 +354,18 @@ contract PlacedFrensHandler is CommonBase, StdCheats, StdUtils, StdAssertions, F
         uint256 id = bound(tokenSeed, 1, total);
         address owner = frens.ownerOf(id);
         if (owner == address(frens)) return;
-        address to = toSeed % (actors.length + 1) == actors.length ? poor : actors[toSeed % (actors.length + 1)];
-        if (to == owner) return;
+        uint256 recipient = toSeed % (actors.length + 2);
+        address to =
+            recipient == actors.length + 1 ? address(frens) : recipient == actors.length ? poor : actors[recipient];
+        if (to == address(frens) && total - frens.inTreasury() == 1) {
+            bytes32 beforeState = _floorSnapshot(owner, id);
+            vm.prank(owner);
+            vm.expectRevert(IMD6900Frens.LastFrenOut.selector);
+            frens.transferFrom(owner, to, id);
+            assertEq(_floorSnapshot(owner, id), beforeState, "direct transfer cannot empty the world");
+            calls["lastTransferRejected"]++;
+            return;
+        }
         vm.prank(owner);
         try frens.transferFrom(owner, to, id) {}
         catch (bytes memory err) {
@@ -373,9 +415,14 @@ contract PlacedFrensHandler is CommonBase, StdCheats, StdUtils, StdAssertions, F
         bool buys = block.number >= frens.lastEthBuyBlock() + frens.buyDelayBlocks() && eth <= frens.maxEthPerBuy();
         uint256 before = imd6900.balanceOf(address(frens));
         if (!buys) {
+            bytes4 reason = block.number < frens.lastEthBuyBlock() + frens.buyDelayBlocks()
+                ? IMD6900Frens.TooSoon.selector
+                : IMD6900Frens.Cap.selector;
             try frens.buyFloorWithEth(eth, 0) {
                 assertTrue(false, "an ETH buy too soon or over the cap went through");
-            } catch {}
+            } catch (bytes memory err) {
+                assertEq(err, abi.encodeWithSelector(reason), "ETH buy rejected for the expected reason");
+            }
             return;
         }
         try frens.buyFloorWithEth(eth, 0) {}
@@ -457,6 +504,7 @@ contract PlacedFrensHandler is CommonBase, StdCheats, StdUtils, StdAssertions, F
             assertEq(frens.jobBudget(), budgetBefore + JOB);
         } catch (bytes memory err) {
             assertTrue(jobs != 0, string.concat("retryJob reverted: ", vm.toString(err)));
+            assertEq(err, abi.encodeWithSelector(IMD6900Frens.BadJob.selector), "retry refused as BadJob");
         }
     }
 
@@ -541,6 +589,7 @@ contract FrensPlacedInvariantsTest is Test, FrensRules {
 
     /// forge-config: default.invariant.runs = 32
     /// forge-config: default.invariant.depth = 60
+    /// forge-config: default.invariant.fail-on-revert = true
     /// @dev Invariant R, and nothing more: the IMD6900 here is the reserve plus what was sent outside the floor
     function invariant_ReserveIsExactlyWhatIsHere() public view {
         assertEq(imd6900.balanceOf(address(frens)), frens.reserve() + handler.ghost6900Donated(), "the reserve is here");
@@ -551,6 +600,7 @@ contract FrensPlacedInvariantsTest is Test, FrensRules {
 
     /// forge-config: default.invariant.runs = 32
     /// forge-config: default.invariant.depth = 60
+    /// forge-config: default.invariant.fail-on-revert = true
     /// @dev The $IMD here is the floor's, the jobs', the approved payments', and what arrived since the last buy
     function invariant_ImdIsTheBooks() public view {
         uint256 books = frens.floorImd() + frens.jobBudget() + imd.allowance(address(frens), address(permit2));
@@ -560,6 +610,7 @@ contract FrensPlacedInvariantsTest is Test, FrensRules {
 
     /// forge-config: default.invariant.runs = 32
     /// forge-config: default.invariant.depth = 60
+    /// forge-config: default.invariant.fail-on-revert = true
     /// @dev Every fren minted is a wallet's or the treasury's, never more than 2222, and the requests add up to them
     function invariant_FrensAreConserved() public view {
         uint256 held = frens.inTreasury() + frens.balanceOf(handler.poor());
@@ -568,6 +619,7 @@ contract FrensPlacedInvariantsTest is Test, FrensRules {
         }
         assertEq(held, frens.totalMinted(), "every fren is somewhere");
         assertLe(frens.totalMinted(), 2222);
+        if (frens.totalMinted() != 0) assertLt(frens.inTreasury(), frens.totalMinted(), "the last fren stays out");
         uint256 n = frens.nextRequestId() - 1;
         assertEq(n, handler.requestCount(), "one request a mint");
         uint256 counted;
@@ -596,6 +648,7 @@ contract FrensPlacedInvariantsTest is Test, FrensRules {
 
     /// forge-config: default.invariant.runs = 32
     /// forge-config: default.invariant.depth = 60
+    /// forge-config: default.invariant.fail-on-revert = true
     /// @dev No trait value past its cap, every revealed fren counted once in every trait, and never more pepes
     ///      revealed and held than there are
     function invariant_CapsHold() public view {
@@ -619,6 +672,7 @@ contract FrensPlacedInvariantsTest is Test, FrensRules {
 
     /// forge-config: default.invariant.runs = 32
     /// forge-config: default.invariant.depth = 60
+    /// forge-config: default.invariant.fail-on-revert = true
     /// @dev The floor is a share: nothing the treasury holds is counted out in the world
     function invariant_FloorIsAShareOfTheWorld() public view {
         (uint256 p6900, uint256 pImd) = frens.floorPerFren();
@@ -630,5 +684,116 @@ contract FrensPlacedInvariantsTest is Test, FrensRules {
         assertGt((pImd + 1) * out, frens.floorImd());
         assertEq(frens.owner(), FrensPlan.OWNER, "the team wallet's");
         assertEq(frens.governor(), FrensPlan.OWNER);
+    }
+
+    function test_HandlerKeepsLastFrenOutAndRejectionsAreAtomic() public {
+        handler.mint(0, 2, 1);
+        handler.recycle(1);
+        handler.donateImd(1e18);
+        handler.recycle(2);
+        handler.transfer(handler.actorCount() + 1, 2);
+        assertEq(handler.calls("lastRecycleRejected"), 1);
+        assertEq(handler.calls("lastTransferRejected"), 1);
+        assertEq(handler.ghostImdUnswept(), 1e18);
+        assertEq(frens.inTreasury(), 1);
+        assertEq(frens.ownerOf(2), handler.actors(0));
+        _assertAllInvariants();
+    }
+
+    function test_HandlerChecksBothTreasuryCapsAfterDonation() public {
+        handler.mint(0, 2, 1);
+        handler.recycle(1);
+        handler.donateImd(1e18);
+        handler.buyTreasury(1, 1);
+        assertEq(handler.calls("reserveCapRejected"), 1);
+        assertEq(handler.calls("imdCapRejected"), 1);
+        assertEq(frens.ownerOf(1), handler.actors(1));
+        assertEq(handler.ghostImdUnswept(), 0);
+        _assertAllInvariants();
+    }
+
+    /// forge-config: default.fuzz.runs = 1000
+    function testFuzz_SpentNonceRejectsOnlyItsOwnBit(uint256 nonce) public {
+        _checkSpentNonce(nonce);
+    }
+
+    function test_SpentNonceBitmapBoundaries() public {
+        _checkSpentNonce(0);
+        _checkSpentNonce(255);
+        _checkSpentNonce(256);
+        _checkSpentNonce(type(uint256).max);
+        _assertAllInvariants();
+    }
+
+    function _checkSpentNonce(uint256 nonce) internal {
+        handler.mint(0, 1, 1);
+        uint256 id = frens.nextRequestId() - 1;
+        uint256 deadline = block.timestamp + 600;
+        IMD6900Frens.Quote memory q =
+            IMD6900Frens.Quote("r", bytes32("s"), "q", bytes32("qh"), bytes32("ph"), "job.open", deadline);
+        permit2.spend(address(frens), nonce);
+        uint256 budgetBefore = frens.jobBudget();
+        uint256 allowanceBefore = imd.allowance(address(frens), address(permit2));
+        uint256 balanceBefore = imd.balanceOf(address(frens));
+        vm.prank(handler.keeper());
+        vm.expectRevert(IMD6900Frens.BadJob.selector);
+        frens.approveJob(id, nonce, deadline, q);
+        assertEq(frens.jobBudget(), budgetBefore, "a spent nonce cannot consume the job budget");
+        assertEq(imd.allowance(address(frens), address(permit2)), allowanceBefore);
+        assertEq(imd.balanceOf(address(frens)), balanceBefore);
+        (,,, bool approved,,, uint8 jobs,,,) = frens.requests(id);
+        assertFalse(approved);
+        assertEq(jobs, 1);
+
+        // A different bit in the same bitmap word is still usable, including at the uint256 boundary.
+        vm.prank(handler.keeper());
+        (bytes32 digest,) = frens.approveJob(id, nonce ^ 1, deadline, q);
+        assertEq(frens.isValidSignature(digest, ""), bytes4(0x1626ba7e));
+        assertEq(frens.jobBudget(), budgetBefore - frens.JOB_PRICE());
+        assertEq(imd.allowance(address(frens), address(permit2)), allowanceBefore + frens.JOB_PRICE());
+    }
+
+    /// @dev Exercise every selected action with live state, including formerly skipped unswept-IMD round trips.
+    function test_HandlerSequenceExercisesPaymentsRevealsAndFailures() public {
+        handler.mint(0, 3, 1);
+        handler.mint(0, 1, 0);
+        handler.transfer(1, 1);
+        handler.transfer(1, 1); // self-transfer
+        handler.donate6900(1e18);
+        handler.donateImd(1e18);
+        handler.mintThenRecycle(2);
+        assertEq(frens.ownerOf(5), address(frens));
+        assertEq(handler.ghostImdUnswept(), 0);
+        handler.buyTreasury(3, 5);
+        handler.setParams(0, 50e18, 0.25 ether);
+        handler.setRate(70_000);
+        handler.buyFloor(1);
+        handler.feeEth(1e15, 1);
+        handler.reveal(0, 1);
+        handler.approveJob(0, 600, false);
+        handler.approveJob(0, 600, false); // live unspent approval refuses a replacement
+        handler.warp(601);
+        handler.approveJob(0, 600, true); // expired approval reclaimed, replacement settled
+        handler.retryJob(0, 1);
+        handler.retryJob(0, 1); // cannot fund the same retry twice
+        handler.reveal(0, 3);
+        handler.setParams(3, 0, 0);
+        handler.feeEth(1, 0); // delay checked before the zero cap
+        handler.feeEth(1, 2);
+        handler.feeEth(1, 2); // cap checked once the delay has elapsed
+        handler.buyFloor(0);
+        assertEq(handler.requestCount(), 3);
+        assertEq(handler.ghostRevealed(), 3);
+        assertGt(handler.ghostFloorBuys(), 0);
+        assertGt(handler.ghostEthSpent(), 0);
+        _assertAllInvariants();
+    }
+
+    function _assertAllInvariants() internal view {
+        invariant_ReserveIsExactlyWhatIsHere();
+        invariant_ImdIsTheBooks();
+        invariant_FrensAreConserved();
+        invariant_CapsHold();
+        invariant_FloorIsAShareOfTheWorld();
     }
 }
